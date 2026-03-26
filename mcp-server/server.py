@@ -1,16 +1,20 @@
 """
-Wellbeing MCP Server — Oura Ring API + Session Effectiveness Log
+Wellbeing MCP Server — Oura Ring OAuth2 + API + Session Log
 
-Wraps Oura Ring API v2 endpoints needed for the wellbeing-calendar plugin.
-Adds a local session effectiveness log for tracking technique outcomes.
+Full Oura Ring MCP with OAuth2 authorization code flow.
+Deployed on Railway, connects to Claude as a remote MCP.
 
 Environment variables:
-  OURA_ACCESS_TOKEN  — Personal access token from https://cloud.ouraring.com/personal-access-tokens
+  OURA_CLIENT_ID       — From https://cloud.ouraring.com/oauth/applications
+  OURA_CLIENT_SECRET   — From Oura developer portal
+  SESSION_LOG_PATH     — Path to session log JSON (default: /tmp/wellbeing-sessions.json)
+  TOKEN_PATH           — Path to OAuth token JSON (default: /tmp/oura-token.json)
+  BASE_URL             — Public URL of this server (e.g., https://oura-toolkit-production.up.railway.app)
 """
 
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -20,24 +24,85 @@ from fastmcp import FastMCP
 mcp = FastMCP("wellbeing-oura")
 
 OURA_BASE = "https://api.ouraring.com/v2/usercollection"
+OURA_AUTH_URL = "https://cloud.ouraring.com/oauth/authorize"
+OURA_TOKEN_URL = "https://api.ouraring.com/oauth/token"
+
+CLIENT_ID = os.environ.get("OURA_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("OURA_CLIENT_SECRET", "")
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8001")
+
+TOKEN_PATH = Path(os.environ.get("TOKEN_PATH", "/tmp/oura-token.json"))
 SESSION_LOG_PATH = Path(os.environ.get("SESSION_LOG_PATH", "/tmp/wellbeing-sessions.json"))
 
+SCOPES = "email personal daily heartrate tag workout session spo2 ring_configuration stress heart_health"
 
-def _token() -> str:
-    token = os.environ.get("OURA_ACCESS_TOKEN", "")
-    if not token:
-        raise ValueError("OURA_ACCESS_TOKEN environment variable is required")
-    return token
+
+# ─── Token Management ───
+
+
+def _load_token() -> dict:
+    if TOKEN_PATH.exists():
+        return json.loads(TOKEN_PATH.read_text())
+    return {}
+
+
+def _save_token(token_data: dict):
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_PATH.write_text(json.dumps(token_data, indent=2))
+
+
+def _get_access_token() -> str:
+    token_data = _load_token()
+    access_token = token_data.get("access_token", "")
+    if not access_token:
+        raise ValueError(
+            f"Not authenticated. Visit {BASE_URL}/authorize to connect your Oura account."
+        )
+    return access_token
+
+
+async def _refresh_token() -> str:
+    """Refresh the access token using the refresh token."""
+    token_data = _load_token()
+    refresh = token_data.get("refresh_token")
+    if not refresh:
+        raise ValueError(
+            f"No refresh token. Visit {BASE_URL}/authorize to re-connect your Oura account."
+        )
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            OURA_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            },
+        )
+        resp.raise_for_status()
+        new_token = resp.json()
+        new_token["refreshed_at"] = datetime.utcnow().isoformat() + "Z"
+        _save_token(new_token)
+        return new_token["access_token"]
 
 
 def _headers() -> dict:
-    return {"Authorization": f"Bearer {_token()}"}
+    return {"Authorization": f"Bearer {_get_access_token()}"}
 
 
 async def _oura_get(endpoint: str, params: dict) -> dict:
     params = {k: v for k, v in params.items() if v is not None}
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{OURA_BASE}/{endpoint}", headers=_headers(), params=params)
+        resp = await client.get(
+            f"{OURA_BASE}/{endpoint}", headers=_headers(), params=params
+        )
+        if resp.status_code == 401:
+            # Token expired, try refresh
+            new_token = await _refresh_token()
+            headers = {"Authorization": f"Bearer {new_token}"}
+            resp = await client.get(
+                f"{OURA_BASE}/{endpoint}", headers=headers, params=params
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -56,76 +121,109 @@ def _save_sessions(sessions: list[dict]):
     SESSION_LOG_PATH.write_text(json.dumps(sessions, indent=2))
 
 
+# ─── Auth Tools ───
+
+
+@mcp.tool()
+async def oura_auth_status() -> dict:
+    """Check if the Oura account is connected and the token is valid."""
+    token_data = _load_token()
+    if not token_data.get("access_token"):
+        return {
+            "connected": False,
+            "message": f"Not connected. Visit {BASE_URL}/authorize to connect your Oura account.",
+        }
+    # Test the token
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{OURA_BASE}/personal_info",
+                headers={"Authorization": f"Bearer {token_data['access_token']}"},
+            )
+            if resp.status_code == 401:
+                # Try refresh
+                await _refresh_token()
+                return {"connected": True, "message": "Token refreshed successfully."}
+            resp.raise_for_status()
+            return {"connected": True, "message": "Oura account connected and token valid."}
+    except Exception as e:
+        return {"connected": False, "message": f"Error: {str(e)}"}
+
+
+@mcp.tool()
+async def oura_get_auth_url() -> dict:
+    """Get the URL to authorize this app with your Oura account."""
+    redirect_uri = f"{BASE_URL}/callback"
+    url = (
+        f"{OURA_AUTH_URL}?client_id={CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
+        f"&response_type=code"
+        f"&scope={SCOPES.replace(' ', '+')}"
+    )
+    return {"auth_url": url, "message": f"Visit this URL to connect your Oura account: {url}"}
+
+
 # ─── Oura Data Tools ───
 
 
 @mcp.tool()
 async def oura_get_daily_sleep(start_date: str, end_date: str) -> dict:
-    """Get daily sleep score summaries from Oura including sleep score contributors for a date range.
-    Dates in YYYY-MM-DD format."""
+    """Get daily sleep score summaries including contributors for a date range. YYYY-MM-DD format."""
     return await _oura_get("daily_sleep", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_sleep(start_date: str, end_date: str) -> dict:
-    """Get detailed sleep period data from Oura including sleep stages (deep, REM, light),
-    heart rate, HRV, movement, and timing for a date range. Dates in YYYY-MM-DD format."""
+    """Get detailed sleep periods with stages, HR, HRV, movement, timing. YYYY-MM-DD format."""
     return await _oura_get("sleep", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_daily_readiness(start_date: str, end_date: str) -> dict:
-    """Get daily readiness scores from Oura including HRV balance, body temperature,
-    and recovery index for a date range. Dates in YYYY-MM-DD format."""
+    """Get daily readiness scores with HRV balance, temperature, recovery index. YYYY-MM-DD format."""
     return await _oura_get("daily_readiness", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_daily_stress(start_date: str, end_date: str) -> dict:
-    """Get daily stress data from Oura including stress high, recovery, and rest minutes
-    for a date range. Dates in YYYY-MM-DD format."""
+    """Get daily stress data with stress_high, recovery, rest minutes. YYYY-MM-DD format."""
     return await _oura_get("daily_stress", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_daily_activity(start_date: str, end_date: str) -> dict:
-    """Get daily activity summaries from Oura including steps, calories, MET minutes,
-    and movement data for a date range. Dates in YYYY-MM-DD format."""
+    """Get daily activity with steps, calories, MET minutes, movement. YYYY-MM-DD format."""
     return await _oura_get("daily_activity", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_heart_rate(start_datetime: str, end_datetime: str) -> dict:
-    """Get heart rate time-series data from Oura (5-minute intervals) for a datetime range.
-    Uses ISO 8601 datetime parameters. Example: 2024-01-01T00:00:00+00:00"""
+    """Get heart rate time-series (5-min intervals). ISO 8601 datetime format."""
     return await _oura_get("heartrate", {"start_datetime": start_datetime, "end_datetime": end_datetime})
 
 
 @mcp.tool()
 async def oura_get_daily_spo2(start_date: str, end_date: str) -> dict:
-    """Get daily SpO2 (blood oxygen) data from Oura for a date range. Dates in YYYY-MM-DD format."""
+    """Get daily SpO2 (blood oxygen) data. YYYY-MM-DD format."""
     return await _oura_get("daily_spo2", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_daily_resilience(start_date: str, end_date: str) -> dict:
-    """Get daily resilience data from Oura for a date range. Dates in YYYY-MM-DD format."""
+    """Get daily resilience data. YYYY-MM-DD format."""
     return await _oura_get("daily_resilience", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_workouts(start_date: str, end_date: str) -> dict:
-    """Get workout data from Oura for a date range. Dates in YYYY-MM-DD format."""
+    """Get workout data. YYYY-MM-DD format."""
     return await _oura_get("workout", {"start_date": start_date, "end_date": end_date})
 
 
 @mcp.tool()
 async def oura_get_personal_info() -> dict:
-    """Get personal info from Oura including age, weight, height, and biological sex."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{OURA_BASE}/personal_info", headers=_headers())
-        resp.raise_for_status()
-        return resp.json()
+    """Get personal info including age, weight, height, biological sex."""
+    return await _oura_get("personal_info", {})
 
 
 # ─── Session Effectiveness Log ───
@@ -147,14 +245,14 @@ async def oura_log_session(
 
     Args:
         technique: Technique ID (e.g., BOX-BREATH, BREATH-RESONANT, WALK-MINDFUL)
-        trigger: What triggered this session (e.g., "daily-plan", "anomaly-stress-spike", "manual")
+        trigger: What triggered this (e.g., "daily-plan", "anomaly-stress-spike", "manual")
         duration_min: Session duration in minutes
-        hr_before: Average heart rate 10 min before session (optional, fill in later)
-        hr_after: Average heart rate 10 min after session (optional, fill in later)
-        completed: yes / partially / skipped (optional, fill in at follow-up)
-        user_rating: 1-5 rating from user (optional, fill in at follow-up)
-        calendar_event_id: Google Calendar event ID (optional)
-        notes: Free text notes (optional)
+        hr_before: Average HR 10 min before session
+        hr_after: Average HR 10 min after session
+        completed: yes / partially / skipped
+        user_rating: 1-5 (5 = very helpful)
+        calendar_event_id: Google Calendar event ID
+        notes: Free text notes
     """
     sessions = _load_sessions()
     entry = {
@@ -185,14 +283,14 @@ async def oura_update_session(
     user_rating: Optional[int] = None,
     notes: Optional[str] = None,
 ) -> dict:
-    """Update an existing session log entry (e.g., to add follow-up data).
+    """Update an existing session log entry with follow-up data.
 
     Args:
-        session_id: The session ID to update
+        session_id: Session ID to update
         hr_before: Average HR before session
         hr_after: Average HR after session
         completed: yes / partially / skipped
-        user_rating: 1-5 rating
+        user_rating: 1-5
         notes: Additional notes
     """
     sessions = _load_sessions()
@@ -221,15 +319,12 @@ async def oura_get_session_log(
     technique: Optional[str] = None,
 ) -> dict:
     """Retrieve the effectiveness log of past wellbeing sessions.
-    Shows technique, HR delta, completion rate, and ratings.
-    Use this to analyze which techniques work best and inform future recommendations.
 
     Args:
         last_n: Return only the last N entries (default: all)
         technique: Filter by technique ID (e.g., BOX-BREATH)
     """
     sessions = _load_sessions()
-
     if technique:
         sessions = [s for s in sessions if s["technique"] == technique]
     if last_n:
@@ -271,5 +366,89 @@ async def oura_get_session_log(
     }
 
 
+# ─── HTTP routes for OAuth callback ───
+
+from starlette.applications import Starlette
+from starlette.responses import RedirectResponse, JSONResponse
+from starlette.routing import Route
+
+
+async def authorize(request):
+    """Redirect user to Oura OAuth authorization page."""
+    redirect_uri = f"{BASE_URL}/callback"
+    url = (
+        f"{OURA_AUTH_URL}?client_id={CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
+        f"&response_type=code"
+        f"&scope={SCOPES.replace(' ', '+')}"
+    )
+    return RedirectResponse(url)
+
+
+async def callback(request):
+    """Handle OAuth callback — exchange code for token."""
+    code = request.query_params.get("code")
+    if not code:
+        return JSONResponse({"error": "No authorization code received"}, status_code=400)
+
+    redirect_uri = f"{BASE_URL}/callback"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            OURA_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            },
+        )
+        if resp.status_code != 200:
+            return JSONResponse(
+                {"error": "Token exchange failed", "details": resp.text},
+                status_code=resp.status_code,
+            )
+        token_data = resp.json()
+        token_data["created_at"] = datetime.utcnow().isoformat() + "Z"
+        _save_token(token_data)
+
+    return JSONResponse({
+        "message": "Oura account connected successfully!",
+        "note": "You can close this page. The MCP server is now authorized to access your Oura data.",
+    })
+
+
+async def health(request):
+    """Health check endpoint."""
+    token = _load_token()
+    return JSONResponse({
+        "status": "ok",
+        "oura_connected": bool(token.get("access_token")),
+    })
+
+
+# Mount both the MCP server and the OAuth routes
+app = Starlette(
+    routes=[
+        Route("/authorize", authorize),
+        Route("/callback", callback),
+        Route("/health", health),
+    ],
+)
+
+# Mount MCP under /mcp/
+mcp_app = mcp.get_asgi_app(path="/mcp")
+
+
+async def combined_app(scope, receive, send):
+    """Route /mcp/* to FastMCP, everything else to Starlette."""
+    if scope["type"] == "http" and scope["path"].startswith("/mcp"):
+        await mcp_app(scope, receive, send)
+    else:
+        await app(scope, receive, send)
+
+
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8001)
+    import uvicorn
+    port = int(os.environ.get("PORT", 8001))
+    uvicorn.run(combined_app, host="0.0.0.0", port=port)
