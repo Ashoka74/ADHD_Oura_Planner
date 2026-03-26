@@ -6,10 +6,10 @@
   },
   "steps": {
     "install": {
-      "commands": ["cd mcp-server && pip install -r requirements.txt"]
+      "commands": ["pip install -r mcp-server/requirements.txt"]
     }
   },
   "deploy": {
-    "startCommand": "cd mcp-server && python server.py"
+    "startCommand": "python mcp-server/server.py"
   }
 }
