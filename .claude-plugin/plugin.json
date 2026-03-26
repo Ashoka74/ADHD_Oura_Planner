@@ -1,0 +1,10 @@
+{
+  "name": "wellbeing-calendar",
+  "description": "Oura Ring + Google Calendar wellbeing advisor — monitors sleep, stress, readiness, and activity, prescribes recovery techniques, schedules them into Google Calendar, and tracks effectiveness over time.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Ashoka74"
+  },
+  "keywords": ["oura", "wellbeing", "calendar", "health", "sleep", "stress", "recovery", "breathing", "mcp"],
+  "skills": "./skills/"
+}

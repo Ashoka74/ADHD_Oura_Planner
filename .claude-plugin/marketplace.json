@@ -1,0 +1,16 @@
+{
+  "name": "wellbeing-calendar-marketplace",
+  "owner": {
+    "name": "Ashoka74"
+  },
+  "metadata": {
+    "description": "Personal wellbeing advisor powered by Oura Ring data and Google Calendar"
+  },
+  "plugins": [
+    {
+      "name": "wellbeing-calendar",
+      "source": "./",
+      "description": "Oura Ring + Google Calendar wellbeing plugin with daily planning, anomaly detection, and effectiveness tracking."
+    }
+  ]
+}
