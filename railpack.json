@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "python",
+  "packages": {
+    "python": "3.12"
+  },
+  "steps": {
+    "install": {
+      "commands": ["cd mcp-server && pip install -r requirements.txt"]
+    }
+  },
+  "deploy": {
+    "startCommand": "cd mcp-server && python server.py"
+  }
+}
