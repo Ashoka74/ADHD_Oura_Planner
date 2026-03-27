@@ -475,6 +475,6 @@ mcp._additional_http_routes = [
 if __name__ == "__main__":
     import sys
     if "--http" in sys.argv:
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=int(os.environ.get("PORT", 8089)))
+        mcp.run(transport="sse", host="0.0.0.0", port=int(os.environ.get("PORT", 8089)))
     else:
         mcp.run(transport="stdio")
