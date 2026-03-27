@@ -6,10 +6,10 @@
   },
   "steps": {
     "install": {
-      "commands": ["pip install -r mcp-server/requirements.txt"]
+      "commands": ["pip install fastmcp httpx uvicorn starlette"]
     }
   },
   "deploy": {
-    "startCommand": "python mcp-server/server.py"
+    "startCommand": "python server.py"
   }
 }
