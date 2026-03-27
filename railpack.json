@@ -1,23 +1,14 @@
 {
   "$schema": "https://schema.railpack.com",
-  "provider": "python",
   "packages": {
     "python": "3.12"
   },
   "steps": {
     "install": {
-      "commands": ["pip install fastmcp httpx uvicorn starlette"]
+      "commands": ["pip install --target=/app/deps fastmcp httpx uvicorn starlette"]
     }
   },
   "deploy": {
-    "startCommand": "python server.py --http",
-    "inputs": [
-      "...",
-      {
-        "step": "install",
-        "include": ["."],
-        "exclude": [".venv"]
-      }
-    ]
+    "startCommand": "PYTHONPATH=/app/deps python server.py --http"
   }
 }
