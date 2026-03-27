@@ -412,10 +412,8 @@ async def callback(request):
         token_data["created_at"] = datetime.utcnow().isoformat() + "Z"
         _save_token(token_data)
 
-    return JSONResponse({
-        "message": "Oura account connected successfully!",
-        "note": "You can close this page. The MCP server is now authorized to access your Oura data.",
-    })
+    # Redirect back to Claude Desktop
+    return RedirectResponse("claude://claude.ai/customize/connectors")
 
 
 async def health(request):
