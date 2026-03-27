@@ -5,10 +5,33 @@
   },
   "steps": {
     "install": {
-      "commands": ["pip install --target=/app/deps fastmcp httpx uvicorn starlette"]
+      "commands": ["pip install --cache-dir=/opt/pip-cache fastmcp httpx uvicorn starlette"]
     }
   },
   "deploy": {
-    "startCommand": "PYTHONPATH=/app/deps python server.py --http"
+    "startCommand": "python server.py --http",
+    "inputs": [
+      {
+        "step": "packages:mise",
+        "include": [
+          "/mise/shims",
+          "/mise/installs",
+          "/usr/local/bin/mise",
+          "/etc/mise/config.toml",
+          "/root/.local/state/mise"
+        ]
+      },
+      {
+        "step": "install",
+        "include": ["."]
+      },
+      {
+        "local": true,
+        "include": ["."]
+      }
+    ],
+    "variables": {
+      "PYTHONUNBUFFERED": "1"
+    }
   }
 }
