@@ -375,10 +375,8 @@ from starlette.routing import Route
 
 async def authorize(request):
     """Redirect user to Oura OAuth authorization page."""
-    redirect_uri = f"{BASE_URL}/callback"
     url = (
         f"{OURA_AUTH_URL}?client_id={CLIENT_ID}"
-        f"&redirect_uri={redirect_uri}"
         f"&response_type=code"
         f"&scope={SCOPES.replace(' ', '+')}"
     )
@@ -391,14 +389,12 @@ async def callback(request):
     if not code:
         return JSONResponse({"error": "No authorization code received"}, status_code=400)
 
-    redirect_uri = f"{BASE_URL}/callback"
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             OURA_TOKEN_URL,
             data={
                 "grant_type": "authorization_code",
                 "code": code,
-                "redirect_uri": redirect_uri,
                 "client_id": CLIENT_ID,
                 "client_secret": CLIENT_SECRET,
             },
