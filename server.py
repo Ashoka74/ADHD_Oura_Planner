@@ -427,28 +427,19 @@ async def health(request):
     })
 
 
-# Mount both the MCP server and the OAuth routes
-app = Starlette(
-    routes=[
-        Route("/authorize", authorize),
-        Route("/callback", callback),
-        Route("/health", health),
-    ],
-)
+# Mount OAuth routes onto the MCP server
+from starlette.routing import Mount
 
-# Mount MCP under /mcp/
-mcp_app = mcp.get_asgi_app(path="/mcp")
-
-
-async def combined_app(scope, receive, send):
-    """Route /mcp/* to FastMCP, everything else to Starlette."""
-    if scope["type"] == "http" and scope["path"].startswith("/mcp"):
-        await mcp_app(scope, receive, send)
-    else:
-        await app(scope, receive, send)
+mcp._additional_http_routes = [
+    Route("/authorize", authorize),
+    Route("/callback", callback),
+    Route("/health", health),
+]
 
 
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8001))
-    uvicorn.run(combined_app, host="0.0.0.0", port=port)
+    import sys
+    if "--http" in sys.argv:
+        mcp.run(transport="streamable-http", host="0.0.0.0", port=int(os.environ.get("PORT", 8089)))
+    else:
+        mcp.run(transport="stdio")

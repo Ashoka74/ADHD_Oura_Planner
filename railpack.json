@@ -10,6 +10,14 @@
     }
   },
   "deploy": {
-    "startCommand": "python server.py"
+    "startCommand": "python server.py --http",
+    "inputs": [
+      "...",
+      {
+        "step": "install",
+        "include": ["."],
+        "exclude": [".venv"]
+      }
+    ]
   }
 }
