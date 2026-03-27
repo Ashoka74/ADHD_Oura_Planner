@@ -375,8 +375,10 @@ from starlette.routing import Route
 
 async def authorize(request):
     """Redirect user to Oura OAuth authorization page."""
+    redirect_uri = f"{BASE_URL}/callback"
     url = (
         f"{OURA_AUTH_URL}?client_id={CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
         f"&response_type=code"
         f"&scope={SCOPES.replace(' ', '+')}"
     )
@@ -384,32 +386,70 @@ async def authorize(request):
 
 
 async def callback(request):
-    """Handle OAuth callback — exchange code for token."""
+    """Handle OAuth callback — supports both code and implicit (token) flows."""
     code = request.query_params.get("code")
-    if not code:
-        return JSONResponse({"error": "No authorization code received"}, status_code=400)
+    access_token = request.query_params.get("access_token")
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            OURA_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-            },
-        )
-        if resp.status_code != 200:
-            return JSONResponse(
-                {"error": "Token exchange failed", "details": resp.text},
-                status_code=resp.status_code,
+    # Implicit flow: token is in the URL fragment, need JS to extract it
+    if not code and not access_token:
+        from starlette.responses import HTMLResponse
+        return HTMLResponse("""
+        <html><body>
+        <p>Connecting your Oura account...</p>
+        <script>
+            // Token is in the URL fragment (#access_token=...)
+            const hash = window.location.hash.substring(1);
+            const params = new URLSearchParams(hash);
+            const token = params.get('access_token');
+            if (token) {
+                fetch('/save-token?access_token=' + token)
+                    .then(() => { document.body.innerHTML = '<h2>Oura connected! You can close this page.</h2>'; })
+                    .catch(e => { document.body.innerHTML = '<h2>Error: ' + e + '</h2>'; });
+            } else {
+                document.body.innerHTML = '<h2>No token received. Please try again.</h2>';
+            }
+        </script>
+        </body></html>
+        """)
+
+    # Authorization code flow
+    if code:
+        redirect_uri = f"{BASE_URL}/callback"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                OURA_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "client_id": CLIENT_ID,
+                    "client_secret": CLIENT_SECRET,
+                },
             )
-        token_data = resp.json()
-        token_data["created_at"] = datetime.utcnow().isoformat() + "Z"
-        _save_token(token_data)
+            if resp.status_code != 200:
+                return JSONResponse(
+                    {"error": "Token exchange failed", "details": resp.text},
+                    status_code=resp.status_code,
+                )
+            token_data = resp.json()
+            token_data["created_at"] = datetime.utcnow().isoformat() + "Z"
+            _save_token(token_data)
 
-    # Redirect back to Claude Desktop
     return RedirectResponse("claude://claude.ai/customize/connectors")
+
+
+async def save_token(request):
+    """Save token from implicit flow (called by JS in callback page)."""
+    access_token = request.query_params.get("access_token")
+    if not access_token:
+        return JSONResponse({"error": "No token"}, status_code=400)
+    token_data = {
+        "access_token": access_token,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "flow": "implicit",
+    }
+    _save_token(token_data)
+    return JSONResponse({"message": "Token saved"})
 
 
 async def health(request):
@@ -427,6 +467,7 @@ from starlette.routing import Mount
 mcp._additional_http_routes = [
     Route("/authorize", authorize),
     Route("/callback", callback),
+    Route("/save-token", save_token),
     Route("/health", health),
 ]
 
